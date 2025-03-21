@@ -4,9 +4,9 @@ import torch.optim as optim
 import random
 from torch.utils.data import DataLoader, random_split
 
-# Import the dataset and the english_to_french list
+# Import dataset and english_to_french data
 from data.dataset import EngFrDataset, english_to_french
-# Import the model definitions from your models folder
+# Import the GRU encoder and decoder from your models folder
 from models.seq2seq_gru import EncoderGRU, DecoderGRU
 
 # -----------------------------
@@ -17,9 +17,9 @@ BATCH_SIZE = 32
 EMBED_SIZE = 256
 HIDDEN_SIZE = 512
 NUM_LAYERS = 2
-DROPOUT = 0.3
+DROPOUT = 0.3  # If training is unstable, try setting this to 0.0
 TEACHER_FORCING_RATIO = 0.5
-LEARNING_RATE = 0.001
+LEARNING_RATE = 1e-4  # Lower learning rate can help avoid NaNs
 CLIP = 5.0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -31,7 +31,7 @@ def train_one_epoch(encoder, decoder, dataloader, enc_opt, dec_opt, criterion, d
     total_loss = 0.0
     total_correct = 0
     total_tokens = 0
-
+    
     for eng_batch, fr_batch in dataloader:
         eng_batch = eng_batch.to(device)
         fr_batch = fr_batch.to(device)
@@ -40,44 +40,48 @@ def train_one_epoch(encoder, decoder, dataloader, enc_opt, dec_opt, criterion, d
         dec_opt.zero_grad()
         
         batch_size = eng_batch.size(0)
-        # Encode
+        # Encode input sentences
         encoder_hidden = encoder.init_hidden(batch_size, device)
         encoder_outputs, encoder_hidden = encoder(eng_batch, encoder_hidden)
         
-        # Initialize decoder using encoder's final hidden state
+        # Decoder uses encoder's final hidden state
         decoder_hidden = encoder_hidden
-        # Decoder input is always the <SOS> token at the first time step
-        decoder_input = torch.tensor([dataset.fr_vocab.word2index["<SOS>"]] * batch_size,
-                                     device=device).unsqueeze(1)
+        decoder_input = torch.tensor(
+            [dataset.fr_vocab.word2index["<SOS>"]] * batch_size,
+            device=device
+        ).unsqueeze(1)  # shape: [batch_size, 1]
+        
         max_len = fr_batch.size(1)
         loss = 0.0
-
-        # Loop over each time step (starting at t=1, since t=0 is <SOS>)
+        
+        # Loop over each time step (starting at t=1, since index 0 is <SOS>)
         for t in range(1, max_len):
             output, decoder_hidden = decoder(decoder_input, decoder_hidden)
             target = fr_batch[:, t]
+            
             loss += criterion(output, target)
             
-            # Compute token-level accuracy (ignore <PAD> tokens)
+            # Compute token-level accuracy (ignoring <PAD> tokens)
             _, predicted = output.max(1)
             mask = (target != dataset.fr_vocab.word2index["<PAD>"])
             total_correct += (predicted[mask] == target[mask]).sum().item()
             total_tokens += mask.sum().item()
             
-            # Teacher forcing: decide if we feed ground truth or the model's prediction
+            # Teacher forcing decision
             if random.random() < TEACHER_FORCING_RATIO:
                 decoder_input = target.unsqueeze(1)
             else:
                 decoder_input = predicted.unsqueeze(1)
-                
+        
         loss.backward()
+        # Clip gradients to help prevent exploding gradients and NaNs
         torch.nn.utils.clip_grad_norm_(encoder.parameters(), CLIP)
         torch.nn.utils.clip_grad_norm_(decoder.parameters(), CLIP)
         enc_opt.step()
         dec_opt.step()
         
         total_loss += loss.item() / (max_len - 1)
-        
+    
     avg_loss = total_loss / len(dataloader)
     accuracy = total_correct / total_tokens if total_tokens > 0 else 0.0
     return avg_loss, accuracy
@@ -100,8 +104,10 @@ def evaluate(encoder, decoder, dataloader, criterion, dataset):
             encoder_outputs, encoder_hidden = encoder(eng_batch, encoder_hidden)
             
             decoder_hidden = encoder_hidden
-            decoder_input = torch.tensor([dataset.fr_vocab.word2index["<SOS>"]] * batch_size,
-                                         device=device).unsqueeze(1)
+            decoder_input = torch.tensor(
+                [dataset.fr_vocab.word2index["<SOS>"]] * batch_size,
+                device=device
+            ).unsqueeze(1)
             max_len = fr_batch.size(1)
             loss = 0.0
             
@@ -116,23 +122,23 @@ def evaluate(encoder, decoder, dataloader, criterion, dataset):
                 total_tokens += mask.sum().item()
                 
                 decoder_input = predicted.unsqueeze(1)
-                
-            total_loss += loss.item() / (max_len - 1)
             
+            total_loss += loss.item() / (max_len - 1)
+    
     avg_loss = total_loss / len(dataloader)
     accuracy = total_correct / total_tokens if total_tokens > 0 else 0.0
     return avg_loss, accuracy
 
 def translate_sentence(sentence, encoder, decoder, dataset, max_length=50):
     """
-    Given an English sentence (string), generate a French translation using the trained encoder-decoder.
+    Translate an English sentence into French using the trained encoder-decoder model.
     """
     encoder.eval()
     decoder.eval()
     
     with torch.no_grad():
+        # Tokenize the sentence and convert words to indices
         words = sentence.lower().strip().split()
-        # Convert words to indices; if a word is unknown, use the <UNK> token
         input_indices = [dataset.eng_vocab.word2index.get(w, dataset.eng_vocab.word2index["<UNK>"]) for w in words]
         input_indices = [dataset.eng_vocab.word2index["<SOS>"]] + input_indices + [dataset.eng_vocab.word2index["<EOS>"]]
         input_tensor = torch.tensor(input_indices, dtype=torch.long, device=device).unsqueeze(0)
@@ -146,30 +152,27 @@ def translate_sentence(sentence, encoder, decoder, dataset, max_length=50):
         for _ in range(max_length):
             output, decoder_hidden = decoder(decoder_input, decoder_hidden)
             _, topi = output.topk(1)
+            # Do not add an extra dimension here—keep the shape as [1, 1]
+            decoder_input = topi.detach()
             next_word = topi.squeeze().item()
-            
             if next_word == dataset.fr_vocab.word2index["<EOS>"]:
                 break
             translated_words.append(dataset.fr_vocab.index2word[next_word])
-            decoder_input = topi.detach().unsqueeze(1)
-            
+        
         return " ".join(translated_words)
 
 def main():
-    # -----------------------------
-    # LOAD DATASET
-    # -----------------------------
+    # Load dataset using the provided english_to_french list
     dataset = EngFrDataset(english_to_french)
-    # 80/20 train/validation split
+    
+    # Split dataset into 80% training and 20% validation
     train_size = int(0.8 * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False)
     
-    # -----------------------------
-    # INITIALIZE MODELS
-    # -----------------------------
+    # Initialize encoder and decoder models
     encoder = EncoderGRU(
         input_size=dataset.eng_vocab.n_words,
         embed_size=EMBED_SIZE,
@@ -186,37 +189,30 @@ def main():
         dropout_p=DROPOUT
     ).to(device)
     
-    # -----------------------------
-    # LOSS & OPTIMIZERS
-    # -----------------------------
+    # Define loss function and optimizers
     criterion = nn.NLLLoss(ignore_index=dataset.fr_vocab.word2index["<PAD>"])
     encoder_optimizer = optim.Adam(encoder.parameters(), lr=LEARNING_RATE)
     decoder_optimizer = optim.Adam(decoder.parameters(), lr=LEARNING_RATE)
     
     best_val_loss = float('inf')
     
-    # -----------------------------
-    # TRAINING LOOP
-    # -----------------------------
+    # Training loop
     for epoch in range(1, EPOCHS + 1):
         train_loss, train_acc = train_one_epoch(encoder, decoder, train_loader,
                                                 encoder_optimizer, decoder_optimizer,
                                                 criterion, dataset)
         val_loss, val_acc = evaluate(encoder, decoder, val_loader, criterion, dataset)
         
-        print(f"Epoch {epoch}/{EPOCHS} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | " +
+        print(f"Epoch {epoch}/{EPOCHS} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
               f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f}")
         
-        # Save the best model based on validation loss
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             torch.save(encoder.state_dict(), "checkpoints/encoder_best.pth")
             torch.save(decoder.state_dict(), "checkpoints/decoder_best.pth")
             print("  --> Best model saved.")
     
-    # -----------------------------
-    # QUALITATIVE EVALUATION
-    # -----------------------------
+    # Qualitative evaluation
     test_sentences = [
         "I am cold",
         "She is happy",

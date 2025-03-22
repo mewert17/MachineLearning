@@ -6,19 +6,19 @@ from torch.utils.data import DataLoader, random_split
 
 from data.dataset import EngFrDataset, english_to_french
 from models.seq2seq_gru import EncoderGRU, DecoderGRU
-
+#using word toekanization not character, done in 1b
 # -----------------------------
 # HYPERPARAMETERS & SETTINGS
 # -----------------------------
-EPOCHS = 20
-BATCH_SIZE = 32
+EPOCHS = 100
+BATCH_SIZE = 16
 EMBED_SIZE = 256
 HIDDEN_SIZE = 512
 NUM_LAYERS = 2
-DROPOUT = 0.3
-TEACHER_FORCING_RATIO = 0.5
+DROPOUT = 0.1
+TEACHER_FORCING_RATIO = 1.0
 LEARNING_RATE = 0.001
-CLIP = 5.0
+CLIP = 1.0
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
